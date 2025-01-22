@@ -3,15 +3,20 @@ import pandas as pd
 import librosa
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+from scipy.stats import skew, kurtosis
+import joblib
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics.pairwise import euclidean_distances
 
 # Load your dataset and model
-@st.cache
-def load_data():
-    # Replace with your actual dataset and clustering model
-    songs_df = pd.read_csv("recommendation_features.csv")  # Your dataset with song features
-    return songs_df
+#@st.cache_data 
+def load_data_and_model():
+    # Replace with your actual dataset
+    clustering_model = joblib.load("clustering_model.pkl")
+    songs_df = pd.read_csv("recommendation_features1.csv")  # Your dataset with song features
+    return songs_df, clustering_model
 
-songs_df = load_data()
+songs_df, clustering_model = load_data_and_model()
 
 # Function to extract spectral features from an audio file
 def extract_features(audio_file, sr=22050):
@@ -21,7 +26,7 @@ def extract_features(audio_file, sr=22050):
         
         # Spectral Features
         features = {}
-
+        
         # MFCCs
         mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
         features['mfcc_mean'] = np.mean(mfccs, axis=1)
@@ -120,29 +125,42 @@ def extract_features(audio_file, sr=22050):
         # Statistics (Skewness and Kurtosis)
         features['skewness'] = skew(y)
         features['kurtosis'] = kurtosis(y)
-
-
         
-        return features
+        # Combine features into a single vector
+        feature_vector = np.hstack(list(features.values()))
+        return feature_vector
     except Exception as e:
-        print(f"Error processing {audio_file}: {e}")
+        st.error(f"Error processing audio: {e}")
         return None
 
 
 
-# Function to recommend similar songs
-def recommend_songs(features, songs_df, num_recommendations=5):
+# Add clustering logic to the recommendation function
+def recommend_songs(features, songs_df, clustering_model, num_recommendations=5):
     # Extract the feature columns from the dataset
     feature_cols = [col for col in songs_df.columns if col.startswith("feature_")]
 
-    # Compute similarity (e.g., cosine similarity) between the input song and dataset
-    dataset_features = songs_df[feature_cols].values
-    similarities = cosine_similarity([features], dataset_features).flatten()
-    songs_df['similarity'] = similarities
+    # Normalize the input song features
+    scaler = StandardScaler()
+    features_scaled = scaler.fit_transform([features])
+
+    # Predict the cluster of the input song
+    predicted_cluster = clustering_model.predict(features_scaled)[0]
+
+    # Filter dataset to include only songs from the same cluster
+    cluster_songs = songs_df[songs_df['cluster'] == predicted_cluster]
+
+    # Compute similarity (e.g., cosine similarity) within the cluster
+    cluster_features = cluster_songs[feature_cols].values
+    distances = euclidean_distances([features], cluster_features).flatten()
+
+    similarities = 1 / (1 + distances)
+    cluster_songs['similarity'] = similarities
 
     # Sort by similarity and return top recommendations
-    recommendations = songs_df.sort_values(by='similarity', ascending=False)
-    return recommendations[['file_name', 'similarity']].head(num_recommendations)
+    recommendations = cluster_songs.sort_values(by='similarity', ascending=False)
+    return recommendations[['file_name', 'similarity', 'audio_path']].head(num_recommendations)
+
 
 # Streamlit UI
 st.title("Song Recommendation App 🎵")
@@ -152,15 +170,27 @@ st.write("Upload a song to get 5 similar song recommendations!")
 uploaded_file = st.file_uploader("Upload a song file (MP3, WAV, etc.)", type=["mp3", "wav"])
 
 if uploaded_file:
+    # Display an audio player for the uploaded file
+    st.subheader("Uploaded Song Preview:")
+    st.audio(uploaded_file, format="audio/mp3")  # Play the uploaded song
+
     # Extract features from the uploaded file
     st.write("Processing uploaded song...")
     song_features = extract_features(uploaded_file)
 
     if song_features is not None:
         st.write("Finding similar songs...")
-        # Recommend similar songs
-        recommendations = recommend_songs(song_features, songs_df)
+
+        # Recommend similar songs (with clustering logic)
+        recommendations = recommend_songs(song_features, songs_df, clustering_model)
+
         st.write("Here are 5 similar songs:")
-        st.dataframe(recommendations)
+
+        # Display recommendations with audio playback
+        for _, row in recommendations.iterrows():
+            st.subheader(row['file_name'])
+            st.write(f"Similarity Score: {row['similarity']:.2f}")
+            st.audio(row['audio_path'], format="audio/mp3")
     else:
         st.error("Failed to extract features from the uploaded file.")
+
